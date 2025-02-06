@@ -1,6 +1,25 @@
+use clap::Parser;
 use git2::{Error, Repository};
-use std::env;
+use semver::Version as SemverVersion;
 use std::process;
+
+#[derive(Parser, Default, Debug)]
+#[command(version, arg_required_else_help = true)]
+/// A CLI app to bump semver tag
+struct Args {
+    #[arg(short = 's', long)]
+    /// The scope of the version: major, minor, or patch
+    scope: Option<String>,
+    #[arg(short = 'o', long)]
+    /// The option to be used: alpha, beta, rc, or just left it empty
+    option: Option<String>,
+    #[arg(short = 'p', long)]
+    /// The prefix to be used: prod, stage, sandbox, dev, etc
+    prefix: Option<String>,
+    #[arg(short = 'd', long, action)]
+    /// Dry run mode, do not create a tag
+    dry_run: bool,
+}
 
 #[derive(Debug, Clone)]
 struct Version {
@@ -12,19 +31,41 @@ struct Version {
     rc_number: Option<u32>,
 }
 
+const SCOPE_MAJOR: &str = "major";
+const SCOPE_MINOR: &str = "minor";
+const SCOPE_PATCH: &str = "patch";
+
+const OPT_ALPHA: &str = "alpha";
+const OPT_BETA: &str = "beta";
+const OPT_RC: &str = "rc";
+
 impl Version {
     fn parse(version: &str) -> Result<Self, String> {
         let parts: Vec<&str> = version.split('-').collect();
+        let mut prefix_and_version: (Option<String>, &str, Option<String>) = (None, "", None);
 
-        let prefix_and_version = if parts[0].contains('.') {
-            (None, parts[0])
+        if parts.len() > 2 {
+            for (index, part) in parts.iter().enumerate() {
+                if is_semver(part) {
+                    prefix_and_version = (
+                        Some(parts[..index].join("-")),
+                        part,
+                        Some(parts[index + 1..].join("-")),
+                    );
+                    break;
+                }
+            }
+        } else if parts.len() == 2 {
+            if is_semver(parts[0]) {
+                prefix_and_version = (None, parts[0], Some(parts[1].to_string()));
+            } else {
+                prefix_and_version = (Some(parts[0].to_string()), parts[1], None);
+            }
+        } else if parts.len() == 1 {
+            prefix_and_version = (None, parts[0], None);
         } else {
-            let mut segments = parts[0].splitn(2, '.');
-            (
-                segments.next().map(|s| format!("-{}", s)),
-                segments.next().unwrap_or(parts[0]),
-            )
-        };
+            return Err("Invalid parts length".to_string());
+        }
 
         let version_parts: Vec<&str> = prefix_and_version.1.split('.').collect();
         if version_parts.len() < 3 {
@@ -41,10 +82,11 @@ impl Version {
             .parse::<u32>()
             .map_err(|_| "Invalid patch version".to_string())?;
 
-        let label = parts.get(1).cloned().map(|s| s.to_string());
+        let label = parts.last().cloned().map(|s| s.to_string());
+
         let rc_number = if let Some(label) = &label {
-            if label.starts_with("rc.") {
-                label[3..].parse::<u32>().ok()
+            if let Some(stripped) = label.strip_prefix("rc.") {
+                stripped.parse::<u32>().ok()
             } else {
                 None
             }
@@ -62,62 +104,67 @@ impl Version {
         })
     }
 
-    fn increment(&self, scope: &str, option: Option<&str>) -> Result<Self, String> {
-        if scope.is_empty() {
-            return Err(
-                "Usage: increment(scope: &str, option: Option<&str>)\nScopes: major, minor, patch"
-                    .to_string(),
-            );
-        }
-
+    fn increment(&self, scope: Option<&str>, option: Option<&str>) -> Result<Self, String> {
         let mut new_version = self.clone();
 
         match scope {
-            "major" => {
+            Some(SCOPE_MAJOR) => {
                 new_version.major += 1;
                 new_version.minor = 0;
                 new_version.patch = 0;
+                new_version.label = None;
             }
-            "minor" => {
+            Some(SCOPE_MINOR) => {
                 new_version.minor += 1;
                 new_version.patch = 0;
+                new_version.label = None;
             }
-            "patch" => {
+            Some(SCOPE_PATCH) => {
                 new_version.patch += 1;
+                new_version.label = None;
             }
-            _ => return Err("Invalid scope. Valid scopes are: major, minor, patch".to_string()),
+            None => {}
+            _ => {
+                return Err(
+                    "Invalid scope. Valid scopes are: major, minor, patch, and option".to_string(),
+                )
+            }
         }
 
         match option {
-            Some("alpha") => {
-                new_version.label = Some("alpha".to_string());
+            Some(OPT_ALPHA) => {
+                new_version.label = Some(OPT_ALPHA.to_string());
                 new_version.rc_number = None;
             }
-            Some("beta") => {
-                new_version.label = Some("beta".to_string());
+            Some(OPT_BETA) => {
+                new_version.label = Some(OPT_BETA.to_string());
                 new_version.rc_number = None;
             }
-            Some("candidate") => {
-                new_version.label = Some("rc".to_string());
-                new_version.rc_number = Some(new_version.rc_number.unwrap_or(0) + 1);
+            Some(OPT_RC) => {
+                let new_rc_number = new_version.rc_number.unwrap_or(0) + 1;
+                let new_label = format!("{}.{}", OPT_RC, new_rc_number);
+
+                new_version.rc_number = Some(new_rc_number);
+                new_version.label = Some(new_label);
             }
-            None => {
-                new_version.label = None;
-                new_version.rc_number = None;
+            None => {}
+            _ => {
+                return Err(
+                    "Invalid option. Valid scopes are: alpha, beta, rc, or just left it empty"
+                        .to_string(),
+                );
             }
-            _ => return Err(
-                "Invalid option. Valid scopes are: alpha, beta, candidate, or just left it empty"
-                    .to_string(),
-            ),
         }
 
         Ok(new_version)
     }
+}
 
-    fn to_string(&self) -> String {
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let version = format!("{}.{}.{}", self.major, self.minor, self.patch);
         let label = if let Some(label) = &self.label {
-            if label == "rc" {
+            if label == OPT_RC {
                 format!("-rc.{}", self.rc_number.unwrap_or(0))
             } else {
                 format!("-{}", label)
@@ -131,29 +178,45 @@ impl Version {
             String::new()
         };
 
-        format!("{}{}{}", prefix, version, label)
+        write!(f, "{}{}{}", prefix, version, label)
     }
 }
 
-fn get_latest_git_tag(repo: &Repository, prefix: Option<&str>) -> Result<String, Error> {
+fn is_semver(version_str: &str) -> bool {
+    SemverVersion::parse(version_str).is_ok()
+}
+
+fn get_latest_git_tag(
+    repo: &Repository,
+    prefix: Option<&str>,
+    option: Option<&str>,
+) -> Result<String, Error> {
     let tags = repo.tag_names(None)?;
 
     let filtered_tags: Vec<&str> = tags
         .iter()
-        .filter_map(|t| t)
+        .flatten()
         .filter(|tag| {
             if let Some(prefix) = prefix {
                 tag.starts_with(prefix)
             } else {
-                true
+                is_semver(tag.split('-').collect::<Vec<&str>>()[0])
             }
         })
         .collect();
 
-    if let Some(tag) = filtered_tags.last() {
+    if filtered_tags.is_empty() {
+        let mut tag = "0.0.0".to_string();
+        if let Some(prefix) = prefix {
+            tag = format!("{}-{}", prefix, tag);
+        }
+        if let Some(option) = option {
+            tag = format!("{}-{}", tag, option);
+        }
         Ok(tag.to_string())
     } else {
-        Err(Error::from_str("No tags found in the repository"))
+        let tag = filtered_tags.last().unwrap().to_string();
+        Ok(tag.to_string())
     }
 }
 
@@ -164,59 +227,31 @@ fn create_git_tag(repo: &Repository, tag: &str) -> Result<(), Error> {
         .target()
         .ok_or_else(|| Error::from_str("Cannot resolve HEAD"))?;
     let commit = repo.find_commit(reference)?;
-    let object = commit.as_object(); // Convert commit to object
+    let object = commit.as_object();
 
-    repo.tag_lightweight(tag, &object, false)?;
+    repo.tag_lightweight(tag, object, false)?;
     println!("Tag '{}' created successfully", tag);
 
     Ok(())
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args = Args::parse();
 
-    if args.contains(&"-h".to_string()) {
-        println!("Usage: {} <scope> [option] [prefix]", args[0]);
-        println!("\nscopes:");
-        println!("  major: Bump the major version and reset minor and patch to 0");
-        println!("  minor: Bump the minor version and reset patch to 0");
-        println!("  patch: Bump the patch version");
-        println!("\noptions:");
-        println!("  alpha: Append '-alpha' to the version");
-        println!("  beta: Append '-beta' to the version");
-        println!(
-            "  candidate: Append '-rc.#' to the version, where # is incremented or starts at 0"
-        );
-        println!("\nExamples:");
-        println!("  {} major alpha", args[0]);
-        println!("  {} minor beta prefix", args[0]);
-        println!("  {} patch candidate", args[0]);
-        process::exit(0);
-    }
-
-    if args.contains(&"-v".to_string()) {
-        println!("{} version 0.1.0", args[0]);
-        process::exit(0);
-    }
-
-    if args.len() < 2 || args.len() > 4 {
-        eprintln!("Invalid arguments. Use '-h' for usage information.");
-        process::exit(1);
-    }
-
-    let scope = &args[1];
-    let option = args.get(2).map(|s| s.as_str());
-    let prefix = args.get(3).map(|s| s.as_str());
+    let scope = args.scope;
+    let option = args.option;
+    let prefix = args.prefix;
+    let dry_run = args.dry_run;
 
     let repo = match Repository::open(".") {
         Ok(repo) => repo,
         Err(e) => {
-            eprintln!("Failed to open repository: {}", e);
+            eprintln!("The current directory is not a git repository: {}", e);
             process::exit(1);
         }
     };
 
-    let current_version = match get_latest_git_tag(&repo, prefix) {
+    let current_version = match get_latest_git_tag(&repo, prefix.as_deref(), option.as_deref()) {
         Ok(tag) => tag,
         Err(e) => {
             eprintln!("Error fetching latest tag: {}", e);
@@ -226,16 +261,20 @@ fn main() {
 
     match Version::parse(&current_version) {
         Ok(version) => {
-            let new_version = match version.increment(scope, option) {
+            let new_version = match version.increment(scope.as_deref(), option.as_deref()) {
                 Ok(new_version) => new_version,
                 Err(e) => {
                     eprintln!("Error incrementing version: {}", e);
                     process::exit(1);
                 }
             };
+
             let new_version_str = new_version.to_string();
 
-            if let Err(e) = create_git_tag(&repo, &new_version_str) {
+            if dry_run {
+                println!("Latest version: '{}'", current_version);
+                println!("New version   : '{}'", new_version_str);
+            } else if let Err(e) = create_git_tag(&repo, &new_version_str) {
                 eprintln!("Error creating tag: {}", e);
                 process::exit(1);
             }
