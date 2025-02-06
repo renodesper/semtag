@@ -42,6 +42,38 @@ If an rc version already exists for a specific scope and prefix, semtag automati
 
 The `-d` flag performs a dry run, displaying the computed version changes without actually applying them.
 
+### Example
+
+```shell
+$ semtag -d -s patch                                                        ⏎
+Latest version: '0.0.0'
+New version   : '0.0.1'
+
+$ semtag -d -s minor
+Latest version: '0.0.0'
+New version   : '0.1.0'
+
+$ semtag -d -s major
+Latest version: '0.0.0'
+New version   : '1.0.0'
+
+$ semtag -d -s patch -o alpha
+Latest version: '0.0.0'
+New version   : '0.0.1-alpha'
+
+$ semtag -d -s minor -o beta
+Latest version: '0.0.0'
+New version   : '0.1.0-beta'
+
+$ semtag -d -s major -o rc
+Latest version: '0.0.0'
+New version   : '1.0.0-rc.1'
+
+$ semtag -d -p prod -s patch -o rc
+Latest version: 'prod-0.0.0'
+New version   : 'prod-0.0.1-rc.1'
+```
+
 ## Inspiration
 
 This project was inspired by the following repositories:
